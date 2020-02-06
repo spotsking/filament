@@ -115,6 +115,7 @@ void PostProcessManager::init() noexcept {
     mMipmapDepth = PostProcessMaterial(mEngine, MATERIALS_MIPMAPDEPTH_DATA, MATERIALS_MIPMAPDEPTH_SIZE);
     mBilateralBlur = PostProcessMaterial(mEngine, MATERIALS_BILATERALBLUR_DATA, MATERIALS_BILATERALBLUR_SIZE);
     mSeparableGaussianBlur = PostProcessMaterial(mEngine, MATERIALS_SEPARABLEGAUSSIANBLUR_DATA, MATERIALS_SEPARABLEGAUSSIANBLUR_SIZE);
+    mBloomBlur = PostProcessMaterial(mEngine, MATERIALS_BLOOMBLUR_DATA, MATERIALS_BLOOMBLUR_SIZE);
     mBlit = PostProcessMaterial(mEngine, MATERIALS_BLIT_DATA, MATERIALS_BLIT_SIZE);
     mTonemapping = PostProcessMaterial(mEngine, MATERIALS_TONEMAPPING_DATA, MATERIALS_TONEMAPPING_SIZE);
     mFxaa = PostProcessMaterial(mEngine, MATERIALS_FXAA_DATA, MATERIALS_FXAA_SIZE);
@@ -173,6 +174,7 @@ void PostProcessManager::terminate(DriverApi& driver) noexcept {
     mMipmapDepth.terminate(mEngine);
     mBilateralBlur.terminate(mEngine);
     mSeparableGaussianBlur.terminate(mEngine);
+    mBloomBlur.terminate(mEngine);
     mBlit.terminate(mEngine);
     mTonemapping.terminate(mEngine);
     mFxaa.terminate(mEngine);
@@ -199,7 +201,10 @@ FrameGraphId <FrameGraphTexture> PostProcessManager::toneMapping(FrameGraph& fg,
             .filterMin = SamplerMinFilter::LINEAR
     };
 
-    auto bloom = gaussianBlurPass(fg, input, 0, {}, 0, 125);
+
+    float bloom = 0.04f;
+
+    auto bloomBlur = bloomBlurPass(fg, input, TextureFormat::R11F_G11F_B10F);
 
     auto& ppToneMapping = fg.addPass<PostProcessToneMapping>("tonemapping",
             [&](FrameGraph::Builder& builder, PostProcessToneMapping& data) {
@@ -211,18 +216,18 @@ FrameGraphId <FrameGraphTexture> PostProcessManager::toneMapping(FrameGraph& fg,
                         .format = outFormat
                 });
                 data.rt = builder.createRenderTarget(data.output);
-                data.bloom = builder.sample(bloom);
+                data.bloom = builder.sample(bloomBlur);
             },
             [=](FrameGraphPassResources const& resources,
                     PostProcessToneMapping const& data, DriverApi& driver) {
-                auto const& color = resources.getTexture(data.input);
-                auto const& bloom = resources.getTexture(data.bloom);
+                auto const& colorTexture = resources.getTexture(data.input);
+                auto const& bloomTexture = resources.getTexture(data.bloom);
 
                 FMaterialInstance* pInstance = mTonemapping.getMaterialInstance();
-                pInstance->setParameter("colorBuffer", color, {});
-                pInstance->setParameter("bloomBuffer", bloom, sampler);
+                pInstance->setParameter("colorBuffer", colorTexture, {});
+                pInstance->setParameter("bloomBuffer", bloomTexture, sampler);
                 pInstance->setParameter("dithering", dithering);
-                pInstance->setParameter("bloom", 0.04f);
+                pInstance->setParameter("bloom", bloom);
                 pInstance->setParameter("fxaa", fxaa);
                 pInstance->commit(driver);
 
@@ -878,6 +883,11 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::gaussianBlurPass(FrameGraph&
             });
 
     return gaussianBlurPasses.getData().out;
+}
+
+FrameGraphId<FrameGraphTexture> PostProcessManager::bloomBlurPass(FrameGraph& fg,
+        FrameGraphId<FrameGraphTexture> input, backend::TextureFormat outFormat) noexcept {
+    return gaussianBlurPass(fg, input, 0, {}, 0, 125);
 }
 
 } // namespace filament
