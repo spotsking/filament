@@ -26,14 +26,12 @@ material {
 
 vertex {
     void postProcessVertex(inout PostProcessVertexInputs postProcess) {
-        // in the fragment shader, this is interpolated to pixel centers, but since we use
-        // texel-fetch, it's not what we want. Convert from screen uv to texture uv.
-        vec2 size = vec2(textureSize(materialParams_source, int(materialParams.level)));
-        postProcess.vertex.xy = (postProcess.normalizedUV - 0.5 * materialParams.resolution.zw) + 0.5 / size;
+        postProcess.vertex.xy = postProcess.normalizedUV;
     }
 }
 
 fragment {
+
     vec3 Tonemap_ReinhardWeighted(const vec3 x, float weight) {
         // Weighted Reinhard tone-mapping operator designed for post-processing
         // This tone-mapping operator is invertible
@@ -45,13 +43,36 @@ fragment {
         // with the weighted Reinhard tone-mapping operator
         return x / (1.0 - max3(x));
     }
-    void tap(inout vec3 sum, float weight, highp vec2 position) {
-        vec3 s = textureLod(materialParams_source, position, materialParams.level).rgb;
-        sum += Tonemap_ReinhardWeighted(s, weight);
-    }
 
     void postProcess(inout PostProcessInputs postProcess) {
+        float level = materialParams.level;
         highp vec2 uv = variable_vertex.xy;
-        postProcess.color.rgb = Tonemap_ReinhardWeighted_Invert(vec3(0.0));
+        highp float du = materialParams.resolution.z;
+        highp float dv = materialParams.resolution.w;
+
+        vec3 c = textureLod(materialParams_source, uv, level).rgb;
+
+        vec3 l = textureLod(materialParams_source, uv + 2.0 * vec2(-du,  0.0), level).rgb;
+        vec3 t = textureLod(materialParams_source, uv + 2.0 * vec2( 0.0, -dv), level).rgb;
+        vec3 r = textureLod(materialParams_source, uv + 2.0 * vec2( du,  0.0), level).rgb;
+        vec3 b = textureLod(materialParams_source, uv + 2.0 * vec2( 0.0,  dv), level).rgb;
+
+        vec3 lt = textureLod(materialParams_source, uv + vec2(-du, -dv), level).rgb;
+        vec3 rt = textureLod(materialParams_source, uv + vec2( du, -dv), level).rgb;
+        vec3 rb = textureLod(materialParams_source, uv + vec2( du,  dv), level).rgb;
+        vec3 lb = textureLod(materialParams_source, uv + vec2(-du,  dv), level).rgb;
+
+        vec3 lt2 = textureLod(materialParams_source, uv + 2.0 * vec2(-du, -dv), level).rgb;
+        vec3 rt2 = textureLod(materialParams_source, uv + 2.0 * vec2( du, -dv), level).rgb;
+        vec3 rb2 = textureLod(materialParams_source, uv + 2.0 * vec2( du,  dv), level).rgb;
+        vec3 lb2 = textureLod(materialParams_source, uv + 2.0 * vec2(-du,  dv), level).rgb;
+
+        vec3 C =  Tonemap_ReinhardWeighted(lt + rt + rb + lb, 0.5  );
+        vec3 LT = Tonemap_ReinhardWeighted( c + l + lt2 + t , 0.125);
+        vec3 RT = Tonemap_ReinhardWeighted( c + t + rt2 + r , 0.125);
+        vec3 RB = Tonemap_ReinhardWeighted( c + r + rb2 + b , 0.125);
+        vec3 LB = Tonemap_ReinhardWeighted( c + b + lb2 + l , 0.125);
+
+        postProcess.color.rgb = Tonemap_ReinhardWeighted_Invert(C + LT + RT + RB + LB);
     }
 }

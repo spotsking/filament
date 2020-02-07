@@ -792,7 +792,7 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::gaussianBlurPass(FrameGraph&
 
     const size_t kernelStorageSize = mSeparableGaussianBlurKernelStorageSize;
     auto& gaussianBlurPasses = fg.addPass<BlurPassData>("Gaussian Blur Passes",
-            [&](FrameGraph::Builder& builder, BlurPassData& data) {
+            [&](FrameGraph::Builder& builder, auto& data) {
                 auto desc = builder.getDescriptor(input);
 
                 if (!output.isValid()) {
@@ -822,15 +822,16 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::gaussianBlurPass(FrameGraph&
                 }, TargetBufferFlags::NONE);
             },
             [=](FrameGraphPassResources const& resources,
-                    BlurPassData const& data, DriverApi& driver) {
+                    auto const& data, DriverApi& driver) {
 
                 PostProcessMaterial const& separableGaussianBlur = mSeparableGaussianBlur;
                 FMaterialInstance* const mi = separableGaussianBlur.getMaterialInstance();
 
-                PipelineState pipeline;
-                pipeline.program = separableGaussianBlur.getProgram();
-                pipeline.rasterState = separableGaussianBlur.getMaterial()->getRasterState();
-                pipeline.scissor = mi->getScissor();
+                PipelineState pipeline{
+                        .program = separableGaussianBlur.getProgram(),
+                        .rasterState = separableGaussianBlur.getMaterial()->getRasterState(),
+                        .scissor = mi->getScissor()
+                };
 
                 float2 kernel[64];
                 size_t m = computeGaussianCoefficients(kernel,
@@ -887,7 +888,86 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::gaussianBlurPass(FrameGraph&
 
 FrameGraphId<FrameGraphTexture> PostProcessManager::bloomBlurPass(FrameGraph& fg,
         FrameGraphId<FrameGraphTexture> input, backend::TextureFormat outFormat) noexcept {
-    return gaussianBlurPass(fg, input, 0, {}, 0, 125);
+
+    Handle<HwRenderPrimitive> fullScreenRenderPrimitive = mEngine.getFullScreenRenderPrimitive();
+
+    static constexpr size_t kLevels = 6;
+
+    struct BloomPassData {
+        size_t levels;
+        FrameGraphId<FrameGraphTexture> in;
+        FrameGraphId<FrameGraphTexture> out;
+        FrameGraphRenderTargetHandle outRT[kLevels];
+    };
+
+    backend::SamplerParams sampler {
+            .filterMag = SamplerMagFilter::LINEAR,
+            .filterMin = SamplerMinFilter::LINEAR
+    };
+
+    auto& bloomPass = fg.addPass<BloomPassData>("Gaussian Blur Passes",
+            [&](FrameGraph::Builder& builder, auto& data) {
+                auto const& desc = builder.getDescriptor(input);
+
+                data.levels = kLevels;
+
+                data.in = builder.sample(input);
+
+                data.out = builder.createTexture("Bloom Texture", {
+                    .width = (desc.width + 1) / 2,
+                    .height = (desc.height + 1) / 2,
+                    .levels = kLevels,
+                    .format = outFormat
+                });
+
+                data.out = builder.write(builder.sample(data.out));
+
+                for (size_t i = 0; i < kLevels; i++) {
+                    data.outRT[i] = builder.createRenderTarget("Bloom target", {
+                            .attachments = { {data.out, uint8_t(i)}, {}}
+                    }, TargetBufferFlags::NONE);
+                }
+            },
+            [=](FrameGraphPassResources const& resources,
+                    auto const& data, DriverApi& driver) {
+
+                PostProcessMaterial const& bloomBlur = mBloomBlur;
+                FMaterialInstance* const mi = bloomBlur.getMaterialInstance();
+
+                PipelineState pipeline{
+                        .program = bloomBlur.getProgram(),
+                        .rasterState = bloomBlur.getMaterial()->getRasterState(),
+                        .scissor = mi->getScissor(),
+                };
+
+                auto hwIn = resources.getTexture(data.in);
+                auto hwOut = resources.getTexture(data.out);
+                auto const& outDesc = resources.getDescriptor(data.out);
+
+                mi->use(driver);
+                mi->setParameter("source", hwIn, sampler);
+                mi->setParameter("level", 0.0f);
+
+                for (size_t i = 0; i < data.levels; i++) {
+                    auto hwOutRT = resources.getRenderTarget(data.outRT[i]);
+
+                    auto w = FTexture::valueForLevel(i, outDesc.width);
+                    auto h = FTexture::valueForLevel(i, outDesc.height);
+                    mi->setParameter("resolution", float4{ w, h, 1.0f / w, 1.0f / h });
+                    mi->commit(driver);
+
+                    hwOutRT.params.flags.discardEnd = TargetBufferFlags::NONE;
+                    driver.beginRenderPass(hwOutRT.target, hwOutRT.params);
+                    driver.draw(pipeline, fullScreenRenderPrimitive);
+                    driver.endRenderPass();
+
+                    // prepare the next level
+                    mi->setParameter("source", hwOut, sampler);
+                    mi->setParameter("level", float(i));
+                }
+            });
+
+    return bloomPass.getData().out;
 }
 
 } // namespace filament
